@@ -3,18 +3,20 @@ import yt_dlp
 import cv2
 import numpy as np
 
+# Original download logic by Person A, lightly refactored
 def download_youtube_video(url, output_folder="Downloads"):
-    """Download YouTube video and return its local file path."""
+    """Download a YouTube video and return its local file path."""
+    from yt_dlp import YoutubeDL
     os.makedirs(output_folder, exist_ok=True)
     ydl_opts = {
-        'outtmpl': os.path.join(output_folder, '%(title)s.%(ext)s'),
-        'format': 'mp4/bestvideo+bestaudio/best'
+        "outtmpl": os.path.join(output_folder, "%(title)s.%(ext)s"),
+        "format": "mp4/bestvideo+bestaudio/best",
+        "merge_output_format": "mp4",
+        "quiet": True,
     }
-
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with YoutubeDL(ydl_opts) as ydl:
         info = ydl.extract_info(url, download=True)
         video_path = ydl.prepare_filename(info)
-
     return video_path
 
 def extract_frames(video_path, frame_interval=10, resize_dim=(256, 256)):
