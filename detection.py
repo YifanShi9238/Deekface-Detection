@@ -176,41 +176,81 @@ def frequency_analysis(frames, max_frames_for_dft=3, every_n_for_dft=20):
 
 def fake_score(features):
     """
-    Fuse DFT + DCT + FFT + guards into a probability.
-    NOTE: We did not change your DFT/DCT math—only when we call them and how we fuse.
+    Compression-aware, jitter-aware fusion that reduces false positives on news/compressed videos.
+    DFT/DCT math is unchanged; only the fusion logic is adapted.
     """
-    if not features: return 0.5
+    if not features:
+        return 0.5
 
+    # helpers to pull series (skip None for sparse DFT)
     get = lambda k: [f[k] for f in features if f[k] is not None]
     get_all = lambda k: [f[k] for f in features]
 
-    fast_hr_m, fast_hr_j = _agg(get_all("fast_hr"))
-    fast_sl_m, _         = _agg(get_all("fast_sl"))
-    dct_dcac_m, _        = _agg(get_all("dct_dc_ac"))
-    dct_hl_m,  dct_hl_j  = _agg(get_all("dct_hl"))
-    dct_ml_m,  _         = _agg(get_all("dct_ml"))
-    block_m,   _         = _agg(get_all("block"))
+    # aggregate means + jitter (frame-to-frame absolute diff)
+    def agg(name, allow_none=False):
+        v = get(name) if not allow_none else get_all(name)
+        v = np.asarray(v, dtype=np.float32)
+        if v.size == 0:
+            return 0.0, 0.0
+        mean = float(np.mean(v))
+        jit  = float(np.mean(np.abs(np.diff(v)))) if v.size > 1 else 0.0
+        return mean, jit
 
-    dft_hr_vals = get("dft_hr")
-    dft_sl_vals = get("dft_sl")
-    dft_hr_m = float(np.mean(dft_hr_vals)) if dft_hr_vals else 0.0
-    dft_sl_m = float(np.mean(dft_sl_vals)) if dft_sl_vals else 0.0
+    # Core spectral features
+    fast_hr_m, fast_hr_j = agg("fast_hr", allow_none=True)
+    fast_sl_m, _         = agg("fast_sl", allow_none=True)
+    dct_dcac_m, _        = agg("dct_dc_ac", allow_none=True)
+    dct_hl_m,  dct_hl_j  = agg("dct_hl", allow_none=True)
+    dct_ml_m,  _         = agg("dct_ml", allow_none=True)
+
+    # Sparse DFT (may be empty if not sampled this run)
+    dft_hr_m, _ = agg("dft_hr")
+    dft_sl_m, _ = agg("dft_sl")
+
+    # Compression proxy (higher => more likely normal codec artifacts)
+    block_m, _  = agg("block", allow_none=True)
+
+    # ---------- Adaptive weights ----------
+    # Shrink spectral influence when compression is high.
+    # weight ∈ (0,1]; higher compression -> smaller weight.
+    comp_weight = 1.0 / (1.0 + 4.0 * max(block_m, 0.0))
+
+    # More reward for natural temporal variation under normal conditions.
+    # Clamp jitter to avoid over-correction on very shaky videos.
+    jitter_term = np.tanh(5.0 * (dct_hl_j + fast_hr_j))
 
     T = np.tanh
-    raw = 0.0
-    # DCT (robust compression-domain cues)
-    raw += 0.20 * T(dct_hl_m) + 0.10 * T(dct_ml_m)
-    raw += 0.10 * T(dct_dcac_m - 0.5)
-    # Fast FFT
-    raw += 0.20 * T(fast_hr_m) + 0.05 * T(abs(fast_sl_m))
-    # Sparse DFT2D (your function)
-    raw += 0.10 * T(dft_hr_m) + 0.05 * T(abs(dft_sl_m))
-    # Guards: compression + temporal jitter reduce score
-    raw -= 0.25 * T(3.0 * block_m)
-    raw -= 0.20 * T(5.0 * (dct_hl_j + fast_hr_j))
+    spectral = 0.0
 
+    # DCT contributions (compression-domain cues)
+    spectral += 0.22 * T(dct_hl_m)
+    spectral += 0.10 * T(dct_ml_m)
+    spectral += 0.08 * T(dct_dcac_m - 0.5)
+
+    # Fast FFT (global spectra on ROI)
+    spectral += 0.18 * T(fast_hr_m)
+    spectral += 0.05 * T(abs(fast_sl_m))
+
+    # Sparse DFT2D (when present)
+    spectral += 0.10 * T(dft_hr_m)
+    spectral += 0.05 * T(abs(dft_sl_m))
+
+    # Apply compression down-weighting
+    spectral *= comp_weight
+
+    # Guards: compression & jitter reduce fake score
+    guard = 0.0
+    guard -= 0.28 * np.tanh(3.0 * block_m)  # stronger compression guard
+    guard -= 0.22 * jitter_term             # reward natural temporal variation
+
+    raw = spectral + guard
+
+    # Soft floor/ceiling to avoid extremes on real-but-compressed footage
     prob = 1.0 / (1.0 + np.exp(-raw))
+    prob = 0.85 * prob + 0.075  # keep within ~[0.075, 0.925]
+
     return float(np.clip(prob, 0.0, 1.0))
+
 
 # =========================
 #           CLI
