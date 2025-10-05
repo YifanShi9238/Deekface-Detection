@@ -1,0 +1,13 @@
+# Existing entries
+__pycache__/
+*.pyc
+.env
+
+# NEW: Don't commit model weights (too large)
+weights/*.pth
+weights/*.pt
+weights/*.p
+models/__pycache__/
+
+# Keep the folder structure
+!weights/.gitkeep

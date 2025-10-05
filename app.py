@@ -24,8 +24,28 @@ try:
 except Exception:
     image_detect = None
 
+# --- NEW: Hybrid detector ---
+try:
+    from models.hybrid_detector import HybridDetector
+    HYBRID_AVAILABLE = True
+except Exception:
+    HYBRID_AVAILABLE = False
+
 # --- Streamlit Config ---
 st.set_page_config(page_title="Frequency-Based Fake Detection", layout="wide")
+
+# --- Initialize hybrid detector (cached) ---
+@st.cache_resource
+def load_hybrid_detector():
+    if not HYBRID_AVAILABLE:
+        return None
+    model_path = 'weights/xception_ff.pth'
+    if os.path.exists(model_path):
+        detector = HybridDetector(model_path=model_path)
+        return detector
+    return None
+
+hybrid_detector = load_hybrid_detector()
 
 # --- Title / Header ---
 st.title("🎥 Frequency-Based Fake Detection")
@@ -37,8 +57,32 @@ st.markdown(
 # --- Sidebar ---
 st.sidebar.header("⚙️ Options")
 input_mode = st.sidebar.radio("Select Input Type:", ("Video", "Image"), horizontal=True)
-demo_mode = st.sidebar.checkbox("Use Demo Mode (no backend required)", value=True)
+demo_mode = st.sidebar.checkbox("Use Demo Mode (no backend required)", value=False)
+
+# NEW: Detection mode selector
+if hybrid_detector and not demo_mode:
+    detection_mode = st.sidebar.selectbox(
+        "Detection Method:",
+        ["Hybrid (CNN + Frequency)", "Frequency Only", "CNN Only"],
+        help="Hybrid combines both methods for best accuracy"
+    )
+    mode_map = {
+        "Hybrid (CNN + Frequency)": "hybrid",
+        "Frequency Only": "frequency",
+        "CNN Only": "cnn"
+    }
+    selected_mode = mode_map[detection_mode]
+else:
+    detection_mode = "Frequency Only"
+    selected_mode = "frequency"
+
 st.sidebar.info("👩‍💻 Built at HackUTA 2025\nTeam: Matteo + A + B + C")
+
+# Status indicator
+if hybrid_detector and hybrid_detector.model_loaded:
+    st.sidebar.success("✅ Hybrid Model Loaded")
+else:
+    st.sidebar.warning("⚠️ CNN Model Not Available\nUsing frequency analysis only")
 
 # --- Input Controls ---
 youtube_url = None
@@ -133,14 +177,27 @@ if st.sidebar.button("Run Detection"):
             st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB),
                      caption="Uploaded Image", use_container_width=True)
 
-            if demo_mode or image_detect is None:
+            # NEW: Use hybrid detector if available
+            if demo_mode:
                 feats = np.random.random(10)
                 score = np.random.uniform(0.3, 0.8)
-            else:
+                result = {'explanation': [], 'cnn_score': None, 'frequency_score': score, 'confidence': 'low'}
+            elif hybrid_detector:
+                result = hybrid_detector.predict(img, mode=selected_mode)
+                score = result['ensemble_score']
+                feats = result['features']
+            elif image_detect:
                 feats = image_detect.frequency_analysis([img])
                 score = image_detect.fake_score(feats)
+                result = {'explanation': [], 'cnn_score': None, 'frequency_score': score, 'confidence': 'low'}
+            else:
+                feats = np.random.random(10)
+                score = np.random.uniform(0.3, 0.8)
+                result = {'explanation': [], 'cnn_score': None, 'frequency_score': score, 'confidence': 'low'}
 
-            F = np.fft.fftshift(np.fft.fft2(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32)))
+            # Get spectrum for visualization
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+            F = np.fft.fftshift(np.fft.fft2(gray.astype(np.float32)))
             spectrum = np.abs(F)
 
     else:
@@ -157,6 +214,7 @@ if st.sidebar.button("Run Detection"):
                 frames = [np.random.randint(0, 255, (256, 256), dtype=np.uint8)]
                 F = np.fft.fftshift(np.fft.fft2(frames[0].astype(np.float32)))
                 spectrum = np.abs(F)
+                result = {'explanation': [], 'cnn_score': None, 'frequency_score': score, 'confidence': 'medium'}
             else:
                 # Acquire video path
                 if youtube_url:
@@ -181,6 +239,7 @@ if st.sidebar.button("Run Detection"):
                 # Frequency analysis
                 feats = frequency_analysis(frames)
                 score = fake_score(feats)
+                result = {'explanation': [], 'cnn_score': None, 'frequency_score': score, 'confidence': 'medium'}
 
                 # Spectrum visualization
                 F = np.fft.fftshift(np.fft.fft2(frames[0].astype(np.float32)))
@@ -205,9 +264,17 @@ if st.sidebar.button("Run Detection"):
         ax.axis("off")
         st.pyplot(fig)
 
-    # --- Score ---
+    # --- Score with confidence ---
     st.subheader("Detection Result")
-    st.metric(label="Fake Probability", value=f"{score * 100:.1f}%")
+    
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.metric(label="Fake Probability", value=f"{score * 100:.1f}%")
+    with col_b:
+        st.metric(label="Confidence", value=result.get('confidence', 'unknown').upper())
+    with col_c:
+        st.metric(label="Method", value=detection_mode)
+    
     st.progress(float(min(max(score, 0.0), 1.0)))
 
     if score < 0.45:
@@ -216,6 +283,26 @@ if st.sidebar.button("Run Detection"):
         st.error("🚨 Likely Fake")
     else:
         st.warning("⚖️ Uncertain — borderline score")
+
+    # NEW: Show component scores if available
+    if result.get('cnn_score') is not None or result.get('frequency_score') is not None:
+        st.subheader("Score Breakdown")
+        score_data = {}
+        if result.get('cnn_score') is not None:
+            score_data['CNN'] = result['cnn_score']
+        if result.get('frequency_score') is not None:
+            score_data['Frequency'] = result['frequency_score']
+        if result.get('ensemble_score') is not None and selected_mode == 'hybrid':
+            score_data['Ensemble'] = result['ensemble_score']
+        
+        score_df = pd.DataFrame(score_data, index=['Score'])
+        st.bar_chart(score_df.T)
+
+    # NEW: Show explanations
+    if result.get('explanation'):
+        st.subheader("Analysis Details")
+        for explanation in result['explanation']:
+            st.info(explanation)
 
     # --- Frequency Energy Breakdown ---
     st.subheader("Frequency Energy Breakdown")
@@ -228,4 +315,4 @@ if st.sidebar.button("Run Detection"):
 
 # --- Footer ---
 st.markdown("---")
-st.caption("Frequency-based AI/Deepfake detection (CPU-only)")
+st.caption("Hybrid AI/Deepfake detection with CNN + Frequency Analysis")

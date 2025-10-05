@@ -195,3 +195,16 @@ def fake_score(features):
         return 0.5
     scores = [image_fake_score(f) for f in features]
     return float(np.mean(scores))
+
+# ADD THIS AT THE END:
+def get_hybrid_detector(model_path=None):
+    """
+    Factory function to create hybrid detector
+    Falls back to frequency-only if no model provided
+    """
+    try:
+        from models.hybrid_detector import HybridDetector
+        return HybridDetector(model_path=model_path)
+    except ImportError:
+        print("⚠ Hybrid detector not available, using frequency-only")
+        return None

@@ -8,3 +8,6 @@ yt-dlp
 librosa
 tqdm
 scikit-image
+torch
+torchvision
+Pillow
