@@ -5,7 +5,7 @@ from scipy.fftpack import dct, idct
 import argparse
 from pathlib import Path
 
-# ---------- DCT 2D (unchanged math) ----------
+# ---------- DCT 2D ----------
 def dct2(a):
     return dct(dct(a.T, norm='ortho').T, norm='ortho')
 
@@ -25,7 +25,6 @@ def face_roi(gray):
         y0,y1 = max(0,y-pad), min(gray.shape[0], y+h+pad)
         x0,x1 = max(0,x-pad), min(gray.shape[1], x+w+pad)
         return gray[y0:y1, x0:x1]
-    # fallback: center crop
     H,W = gray.shape[:2]
     s = min(H,W)
     return gray[(H-s)//2:(H+s)//2, (W-s)//2:(W+s)//2]
@@ -59,7 +58,7 @@ def ticker_graphics_score(gray):
     s = 0.6*horiz_bias + 0.4*np.tanh(3.0*row_density)
     return float(np.clip(s, 0.0, 1.0))
 
-# ---------- Shared spectral stats ----------
+# ---------- Spectral / Artifacts ----------
 def center_low_high_stats(mag, frac=0.25):
     h,w = mag.shape
     cy,cx = h//2, w//2
@@ -72,7 +71,6 @@ def center_low_high_stats(mag, frac=0.25):
     slope = float(np.mean(np.abs(gy))+np.mean(np.abs(gx)))
     return lowE, highE, high_ratio, slope
 
-# ---------- Artifact triggers ----------
 def radial_peakiness(mag, nbins=24):
     h, w = mag.shape
     cy, cx = h//2, w//2
@@ -118,18 +116,16 @@ def benford_dct_deviation(Cabs):
     p = counts / (counts.sum() + 1e-8)
     return float(np.sum(np.abs(p - benford)))
 
-# ---------- Feature extraction for a single image ----------
+# ---------- Core feature & score ----------
 def image_features(img_bgr):
     gray = img_bgr if img_bgr.ndim==2 else cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     roi  = face_roi(gray)
     roi  = cv2.resize(roi, (256,256), interpolation=cv2.INTER_AREA)
 
-    # FFT
     F = np.fft.fftshift(np.fft.fft2(roi.astype(np.float32)))
     mag = np.abs(F) + 1e-8
     _, _, fast_hr, fast_sl = center_low_high_stats(mag, frac=0.25)
 
-    # DCT
     g = roi.astype(np.float32)
     g = (g - g.mean())/(g.std()+1e-8)
     C = dct2(g)
@@ -140,109 +136,62 @@ def image_features(img_bgr):
     eL=float(np.sum(Cabs[:r1,:r1])); eM=float(np.sum(Cabs[r1:r2, r1:r2])); eH=float(np.sum(Cabs[r2:, r2:]))
     dct_hl = eH/(eL+1e-8); dct_ml = eM/(eL+1e-8)
 
-    # Guards
     block = compression_blockiness(roi)
     gfx   = ticker_graphics_score(roi)
 
-    # Artifact cues
     peak = radial_peakiness(mag)
     grid = grid_peak_score(mag)
     benf = benford_dct_deviation(Cabs)
 
     return {
-        "fast_hr": float(fast_hr),
-        "fast_sl": float(fast_sl),
-        "dct_dc_ac": float(dct_dc_ac),
-        "dct_hl": float(dct_hl),
-        "dct_ml": float(dct_ml),
-        "block": float(block),
-        "gfx": float(gfx),
-        "peak": float(peak),
-        "grid": float(grid),
-        "benf": float(benf)
+        "fast_hr": fast_hr,
+        "fast_sl": fast_sl,
+        "dct_dc_ac": dct_dc_ac,
+        "dct_hl": dct_hl,
+        "dct_ml": dct_ml,
+        "block": block,
+        "gfx": gfx,
+        "peak": peak,
+        "grid": grid,
+        "benf": benf
     }
 
-# ---------- Fusion for one image ----------
 def image_fake_score(feat):
-    # Trust spectra less if compression/graphics are high
     block_m = feat["block"]; gfx_m = feat["gfx"]
     comp_weight = 1.0 / (1.0 + 6.0 * max(block_m, 0.0))
     gfx_weight  = 1.0 / (1.0 + 4.0 * max(gfx_m,   0.0))
     spectral_weight = comp_weight * gfx_weight
-
     T = np.tanh
-
-    # Base spectral score
-    spectral = 0.0
-    spectral += 0.20 * T(feat["dct_hl"])
-    spectral += 0.08 * T(feat["dct_ml"])
-    spectral += 0.04 * T(feat["dct_dc_ac"] - 0.5)
-    spectral += 0.18 * T(feat["fast_hr"])
-    spectral += 0.05 * T(abs(feat["fast_sl"]))
+    spectral = 0.20*T(feat["dct_hl"]) + 0.08*T(feat["dct_ml"]) + 0.04*T(feat["dct_dc_ac"]-0.5)
+    spectral += 0.18*T(feat["fast_hr"]) + 0.05*T(abs(feat["fast_sl"]))
     spectral *= spectral_weight
-
-    # Guards (compression/news graphics drop score)
-    guard = 0.0
-    guard -= 0.35 * np.tanh(3.0 * block_m)
-    guard -= 0.20 * np.tanh(3.0 * gfx_m)
-
-    # Evidence triggers (only if low compression)
+    guard = -0.35*np.tanh(3.0*block_m) - 0.20*np.tanh(3.0*gfx_m)
     low_comp = float(block_m < 0.18)
-    evidence = 0.0
-    evidence += low_comp * 0.40 * T(max(0.0, feat["peak"] - 2.1) * 1.6)
-    evidence += low_comp * 0.30 * T(max(0.0, feat["grid"] - 0.11) * 8.0)
-    evidence += low_comp * 0.30 * T(max(0.0, feat["benf"] - 0.18) * 6.0)
-
+    evidence = 0.40*low_comp*T(max(0.0,feat["peak"]-2.1)*1.6)
+    evidence += 0.30*low_comp*T(max(0.0,feat["grid"]-0.11)*8.0)
+    evidence += 0.30*low_comp*T(max(0.0,feat["benf"]-0.18)*6.0)
     raw = spectral + guard + evidence
-    prob = 1.0 / (1.0 + np.exp(-raw))
-    prob = 0.90 * prob + 0.05
-    return float(np.clip(prob, 0.0, 1.0))
+    prob = 1.0/(1.0+np.exp(-raw))
+    prob = 0.9*prob + 0.05
+    return float(np.clip(prob,0.0,1.0))
 
-# ---------- CLI ----------
-def latest_image_in_downloads():
-    dl = Path.home()/ "Downloads"
-    if not dl.exists():
-        return ""
-    exts = {".jpg",".jpeg",".png",".bmp",".webp"}
-    cands = [p for p in dl.iterdir() if p.suffix.lower() in exts]
-    if not cands:
-        return ""
-    cands.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return str(cands[0])
+# ---------- Compatibility Wrappers for app.py ----------
+def frequency_analysis(frames):
+    """
+    Adapter for Streamlit app.
+    Takes list of frames (images) and returns list of features like detection.py.
+    """
+    feats = []
+    for frame in frames:
+        feats.append(image_features(frame))
+    return feats
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Frequency-based AI image detector")
-    default_path = "/home/yifan_shi/project/UTAHack/Deekface-Detection/Downloads/test3.jpg" 
-    # default_path = latest_image_in_downloads()
-    parser.add_argument("image", nargs="?", default=default_path, help="Path to image file")
-    args = parser.parse_args()
-
-    if not args.image:
-        print("Provide an image path (jpg/png).")
-        raise SystemExit(1)
-
-    path = args.image
-    if not os.path.exists(path):
-        print("File not found:", path)
-        raise SystemExit(1)
-
-    img = cv2.imread(path)
-    if img is None:
-        print("Failed to load image.")
-        raise SystemExit(1)
-
-    feat = image_features(img)
-    score = image_fake_score(feat)
-
-    print(f"File: {path}")
-    print(f"Fake probability: {score:.3f}")
-    if score < 0.45:
-        print("→ Likely REAL")
-    elif score > 0.55:
-        print("→ Likely FAKE")
-    else:
-        print("→ UNCERTAIN")
-
-    # Optional: quick feature dump to help tuning
-    for k in ["block","gfx","peak","grid","benf","fast_hr","dct_hl","dct_ml","dct_dc_ac"]:
-        print(f"{k}: {feat[k]:.4f}")
+def fake_score(features):
+    """
+    Adapter for Streamlit app.
+    Takes feature list (usually 1 image) and averages scores.
+    """
+    if not features:
+        return 0.5
+    scores = [image_fake_score(f) for f in features]
+    return float(np.mean(scores))
