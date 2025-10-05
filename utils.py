@@ -32,6 +32,8 @@ def extract_frames(video_path, frame_interval=10, resize_dim=(256, 256)):
     if not cap.isOpened():
         print("Cannot open video:", video_path)
         return frames
+    else:
+        print("Video opened successfully:", video_path)
 
     frame_count = 0
     while True:
@@ -53,6 +55,7 @@ if __name__ == "__main__":
     import matplotlib.pyplot as plt
     path = "Downloads/test_video.mp4"
     frames = extract_frames(path, 15)
+    print(f"Extracted {len(frames)} frames.")
     plt.imshow(frames[0], cmap="gray")
     plt.show()
 

@@ -5,7 +5,7 @@ from utils import extract_frames, download_youtube_video
 
 def frequency_analysis(frames):
     features = []
-    if not frames:
+    if len(frames) == 0:
         return features
     for frame in frames:
         if frame.ndim == 3:
@@ -53,8 +53,9 @@ if __name__ == "__main__":
         print("File not found.")
         raise SystemExit(1)
 
-    frames = extract_frames(video_path, every_n_frames=10, resize=(256, 256))
-    if not frames:
+    frames = extract_frames(video_path, frame_interval=10, resize_dim=(256, 256))
+    print(f"Extracted {len(frames)} frames.")
+    if len(frames) == 0:
         print("Couldn’t extract frames.")
         raise SystemExit(1)
 
