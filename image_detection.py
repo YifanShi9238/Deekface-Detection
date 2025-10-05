@@ -212,7 +212,8 @@ def latest_image_in_downloads():
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Frequency-based AI image detector")
-    default_path = latest_image_in_downloads()
+    default_path = "/home/yifan_shi/project/UTAHack/Deekface-Detection/Downloads/test3.jpg" 
+    # default_path = latest_image_in_downloads()
     parser.add_argument("image", nargs="?", default=default_path, help="Path to image file")
     args = parser.parse_args()
 
@@ -235,9 +236,9 @@ if __name__ == "__main__":
 
     print(f"File: {path}")
     print(f"Fake probability: {score:.3f}")
-    if score < 0.40:
+    if score < 0.45:
         print("→ Likely REAL")
-    elif score > 0.60:
+    elif score > 0.55:
         print("→ Likely FAKE")
     else:
         print("→ UNCERTAIN")
